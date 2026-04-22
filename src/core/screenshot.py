@@ -82,6 +82,25 @@ class ScreenCapture:
         new_size = (img.width * factor, img.height * factor)
         return img.resize(new_size, Image.LANCZOS)
 
+    @staticmethod
+    def preprocess_for_ocr(img: Image.Image) -> Image.Image:
+        """图像预处理：提升暗背景浅色文字的OCR识别率"""
+        arr = np.array(img)
+        gray = np.mean(arr, axis=2)
+
+        # 如果画面整体偏暗(平均亮度 < 100)，做反色+增强对比度
+        avg_brightness = gray.mean()
+        if avg_brightness < 100:
+            # 反色：暗背景亮文字 → 亮背景暗文字（OCR更友好）
+            arr = 255 - arr
+
+        # 增强对比度
+        from PIL import ImageEnhance
+        enhanced = Image.fromarray(arr)
+        enhanced = ImageEnhance.Contrast(enhanced).enhance(2.0)
+        enhanced = ImageEnhance.Sharpness(enhanced).enhance(1.5)
+        return enhanced
+
     def get_monitors(self) -> list[dict]:
         """获取所有显示器信息"""
         return self._sct.monitors[1:]  # 排除第一个(组合显示器)

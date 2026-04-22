@@ -333,6 +333,13 @@ class MainWindow(QMainWindow):
         self.pipeline.translator = None
         self.config.save()
 
+    def _hide_overlay_for_capture(self):
+        """截图前隐藏覆盖层，避免截到自己的翻译"""
+        if self.overlay and self.overlay.isVisible():
+            self.overlay.hide()
+            QApplication.processEvents()  # 确保窗口真的隐藏了
+            import time; time.sleep(0.05)  # 等待屏幕刷新
+
     def _snapshot_translate(self):
         if not self.capture_region:
             self._status.showMessage("请先选择游戏窗口或框选区域")
@@ -340,6 +347,7 @@ class MainWindow(QMainWindow):
         self._apply_settings()
         self._status.showMessage("正在翻译...")
         self._btn_snapshot.setEnabled(False)
+        self._hide_overlay_for_capture()
 
         def run():
             loop = asyncio.new_event_loop()
@@ -386,7 +394,14 @@ class MainWindow(QMainWindow):
     def _realtime_tick(self):
         if self._is_translating or not self.capture_region:
             return
+
+        # 先隐藏覆盖层再检测变化和截图
+        self._hide_overlay_for_capture()
+
         if not self.pipeline.capture.has_changed(self.capture_region):
+            # 没变化，恢复覆盖层
+            if self.overlay:
+                self.overlay.show()
             return
 
         self._is_translating = True

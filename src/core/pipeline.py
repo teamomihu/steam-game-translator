@@ -89,9 +89,10 @@ class TranslationPipeline:
         cache_hits = 0
         cache_misses = 0
 
-        # 1. OCR
+        # 1. 图像预处理 + OCR
         t0 = time.perf_counter()
-        upscaled = self.capture.upscale(image, self.config.ocr.scale_factor)
+        processed = self.capture.preprocess_for_ocr(image)
+        upscaled = self.capture.upscale(processed, self.config.ocr.scale_factor)
         ocr_output = self.ocr.recognize(upscaled)
         ocr_time = (time.perf_counter() - t0) * 1000
 
@@ -109,6 +110,10 @@ class TranslationPipeline:
         for item in ocr_output.results:
             text = item.text.strip()
             if not text or len(text) < 2:
+                continue
+
+            # 过滤明显的OCR垃圾（纯数字、纯符号、混合乱码）
+            if self._is_garbage(text):
                 continue
 
             # 检测是否已经是中文 (跳过不需翻译的)
@@ -242,6 +247,29 @@ class TranslationPipeline:
         """检测文本是否主要是中文"""
         chinese_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
         return chinese_count > len(text) * 0.5
+
+    @staticmethod
+    def _is_garbage(text: str) -> bool:
+        """检测OCR结果是否为垃圾/乱码"""
+        import re
+        # 纯数字或纯符号
+        if re.fullmatch(r'[\d\s\.\,\-\+\=\*\/\#\@\!\?\;\:]+', text):
+            return True
+        # 有效字母太少（字母+汉字+假名 占比不到30%）
+        valid = sum(1 for c in text if c.isalpha() or '\u4e00' <= c <= '\u9fff'
+                    or '\u3040' <= c <= '\u30ff')
+        if len(text) > 3 and valid / len(text) < 0.3:
+            return True
+        # 中英日混杂在一起的乱码（比如"房层历中ORY"）
+        has_chinese = any('\u4e00' <= c <= '\u9fff' for c in text)
+        has_latin = any(c.isascii() and c.isalpha() for c in text)
+        if has_chinese and has_latin and len(text) < 15:
+            # 短文本中中英混杂，大概率是OCR把覆盖层和原文混在一起了
+            chinese_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+            latin_count = sum(1 for c in text if c.isascii() and c.isalpha())
+            if 0.2 < chinese_count / len(text) < 0.8:
+                return True
+        return False
 
     @staticmethod
     def _scale_bbox(bbox: tuple, scale: float) -> tuple[int, int, int, int]:

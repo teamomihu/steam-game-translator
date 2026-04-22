@@ -200,9 +200,12 @@ class OllamaEngine(TranslationEngine):
             glossary_text = f"术语表：{', '.join(pairs)}\n"
 
         prompt = (
-            f"将以下游戏文本翻译为中文，只输出译文：\n"
+            f"[翻译任务] 将下面的英文/日文游戏菜单文本翻译成中文。\n"
+            f"规则：只输出中文译文，不要解释，不要说多余的话，不要打招呼。\n"
+            f"如果原文只是一个单词或短语，译文也只输出对应的中文词语。\n"
             f"{glossary_text}"
-            f"{request.text}"
+            f"原文：{request.text}\n"
+            f"中文译文："
         )
 
         response = await self._client.post(
@@ -211,12 +214,27 @@ class OllamaEngine(TranslationEngine):
                 "model": self._model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"temperature": 0.3},
+                "options": {"temperature": 0.1, "num_predict": 100},
             },
         )
         response.raise_for_status()
         data = response.json()
         translated = data.get("response", "").strip()
+
+        # 清理 LLM 可能输出的废话
+        # 去掉常见前缀
+        for prefix in ["中文译文：", "译文：", "翻译：", "中文："]:
+            if translated.startswith(prefix):
+                translated = translated[len(prefix):].strip()
+        # 去掉引号包裹
+        if translated.startswith('"') and translated.endswith('"'):
+            translated = translated[1:-1]
+        # 如果输出包含解释性文字（句号后面有解释），只取第一句
+        if "。\n" in translated:
+            translated = translated.split("。\n")[0]
+        # 如果翻译结果比原文长太多（3倍以上），可能是废话
+        if len(translated) > len(request.text) * 3 and len(request.text) < 30:
+            translated = translated[:len(request.text) * 2]
 
         return TranslationResult(
             original=request.text,

@@ -18,7 +18,7 @@ GLOSSARY_DIR = CONFIG_DIR / "glossary"
 class OCRConfig:
     engine: str = "rapidocr"  # rapidocr | paddleocr | system
     language: str = "ja+en"   # 源语言
-    confidence_threshold: float = 0.5
+    confidence_threshold: float = 0.6
     scale_factor: int = 2     # 截图放大倍数提升OCR精度
 
 

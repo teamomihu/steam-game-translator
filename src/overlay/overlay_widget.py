@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QRect, QPoint
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtCore import Qt, QRect, QRectF
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PySide6.QtWidgets import QWidget
 
 from src.core.config import OverlayConfig
@@ -34,7 +34,6 @@ class OverlayWindow(QWidget):
         """更新显示内容"""
         self._blocks = blocks
         self._region = region
-        # 定位到截图区域
         self.setGeometry(region.x, region.y, region.width, region.height)
         self.update()
 
@@ -48,38 +47,60 @@ class OverlayWindow(QWidget):
         font = QFont(self.config.font_family, self.config.font_size)
         font.setBold(True)
         painter.setFont(font)
+        fm = QFontMetrics(font)
 
         text_color = QColor(self.config.text_color)
         bg_color = QColor(self.config.bg_color)
         bg_color.setAlphaF(self.config.opacity)
 
+        # 收集所有要渲染的矩形，防止重叠
+        rendered_rects: list[QRect] = []
+
         for block in self._blocks:
             x1, y1, x2, y2 = block.bbox
             text = block.translated
+            block_width = x2 - x1
+            block_height = y2 - y1
 
-            # 计算文本区域
-            text_rect = QRect(x1, y1, x2 - x1, y2 - y1)
+            # 根据文字实际大小计算需要的高度
+            text_width = max(block_width, 80)
+            text_height = max(block_height, fm.height() + 8)
 
-            # 绘制半透明背景
-            painter.fillRect(text_rect.adjusted(-2, -2, 4, 4), bg_color)
+            text_rect = QRect(x1, y1, text_width, text_height)
 
-            # 绘制文字阴影 (增强可读性)
-            painter.setPen(QColor(0, 0, 0, 180))
-            painter.drawText(text_rect.adjusted(1, 1, 1, 1), Qt.AlignLeft | Qt.TextWordWrap, text)
+            # 防重叠：如果和已有矩形重叠，往下移
+            for existing in rendered_rects:
+                attempts = 0
+                while text_rect.intersects(existing) and attempts < 10:
+                    text_rect.moveTop(text_rect.top() + text_height + 4)
+                    attempts += 1
 
-            # 绘制文字
+            rendered_rects.append(text_rect)
+
+            # 绘制圆角半透明背景
+            bg_rect = text_rect.adjusted(-6, -3, 6, 3)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(bg_color)
+            painter.drawRoundedRect(bg_rect, 4, 4)
+
+            # 绘制文字（白色 + 黑色描边增强可读性）
+            # 描边
+            painter.setPen(QColor(0, 0, 0, 200))
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                painter.drawText(text_rect.adjusted(dx, dy, dx, dy),
+                                Qt.AlignCenter | Qt.TextWordWrap, text)
+            # 正文
             painter.setPen(text_color)
-            painter.drawText(text_rect, Qt.AlignLeft | Qt.TextWordWrap, text)
+            painter.drawText(text_rect, Qt.AlignCenter | Qt.TextWordWrap, text)
 
         painter.end()
 
     def toggle_passthrough(self, enabled: bool):
-        """切换点击穿透"""
         if enabled:
             self.setWindowFlags(self.windowFlags() | Qt.WindowTransparentForInput)
         else:
             self.setWindowFlags(self.windowFlags() & ~Qt.WindowTransparentForInput)
-        self.show()  # 需要重新show以应用flag变更
+        self.show()
 
     def hide_overlay(self):
         self.hide()

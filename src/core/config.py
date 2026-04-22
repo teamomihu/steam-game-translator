@@ -24,7 +24,7 @@ class OCRConfig:
 
 @dataclass
 class TranslationConfig:
-    engine: str = "openai"    # openai | deepl | google | ollama
+    engine: str = "ollama"    # ollama | openai | deepl
     target_language: str = "zh-CN"
     source_language: str = "auto"
     # OpenAI / Gemini
@@ -35,7 +35,7 @@ class TranslationConfig:
     deepl_key: str = ""
     # Ollama (本地)
     ollama_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen2.5:7b"
+    ollama_model: str = "qwen2.5:1.5b"
     # 翻译质量
     context_window: int = 5   # 上下文窗口大小(条数)
     max_concurrent: int = 3   # 最大并发翻译数

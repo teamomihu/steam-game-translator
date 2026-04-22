@@ -75,7 +75,30 @@ if [ $? -ne 0 ]; then
     .venv/bin/pip install rapidocr-onnxruntime -q 2>/dev/null
 fi
 
-# ---------- 第4步：启动程序 ----------
+# ---------- 第4步：自动启动 Ollama ----------
+OLLAMA_PID=""
+if command -v ollama &>/dev/null; then
+    if curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
+        echo "✅ Ollama 翻译引擎已在运行"
+    else
+        echo "🔄 正在启动 Ollama 翻译引擎..."
+        ollama serve &>/dev/null &
+        OLLAMA_PID=$!
+        sleep 2
+        if curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
+            echo "✅ Ollama 翻译引擎启动成功"
+        else
+            echo "⚠️  Ollama 启动中，稍后可能需要等一下..."
+        fi
+    fi
+else
+    echo "💡 未安装 Ollama（免费翻译引擎）"
+    echo "   安装方法: brew install ollama && ollama pull qwen2.5:7b"
+    echo "   或使用 OpenAI/DeepL 引擎（需要 API Key）"
+fi
+echo ""
+
+# ---------- 第5步：启动程序 ----------
 echo "🚀 启动中..."
 echo ""
 echo "使用方法："
@@ -83,14 +106,16 @@ echo "  1. 点击「框选区域」选择你要翻译的游戏画面区域"
 echo "  2. 点击「截图翻译」进行一次翻译"
 echo "  3. 或点击「开始实时翻译」持续自动翻译"
 echo ""
-echo "💡 提示：首次使用需要设置翻译API Key"
-echo "   在设置中选择翻译引擎，然后配置 API Key"
-echo "   推荐使用 Ollama（免费本地翻译）"
-echo ""
 echo "────────────────────────────────────────"
 echo ""
 
 PYTHONPATH="$(pwd)" $PYTHON src/main.py
+
+# 程序退出后，如果是我们启动的 Ollama，也关掉
+if [ -n "$OLLAMA_PID" ]; then
+    echo "🔄 正在关闭 Ollama..."
+    kill "$OLLAMA_PID" 2>/dev/null
+fi
 
 echo ""
 read -p "程序已退出，按回车键关闭窗口..."

@@ -73,6 +73,11 @@ class RapidOCREngine(OCREngine):
         if result:
             for item in result:
                 bbox_points, text, confidence = item
+                # RapidOCR 有时返回字符串类型的置信度，统一转为 float
+                try:
+                    confidence = float(confidence) if confidence is not None else 0.0
+                except (TypeError, ValueError):
+                    confidence = 0.0
                 if confidence < self._threshold:
                     continue
                 # bbox_points 是4个点 [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
@@ -132,6 +137,10 @@ class PaddleOCREngine(OCREngine):
         if result and result[0]:
             for line in result[0]:
                 bbox_points, (text, confidence) = line
+                try:
+                    confidence = float(confidence) if confidence is not None else 0.0
+                except (TypeError, ValueError):
+                    confidence = 0.0
                 if confidence < self._threshold:
                     continue
                 xs = [p[0] for p in bbox_points]

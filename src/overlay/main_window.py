@@ -1,25 +1,26 @@
-"""主窗口 - 区域选择 + 翻译控制面板"""
+"""主窗口 - 区域选择 + 窗口跟踪 + 翻译控制面板"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import threading
-from functools import partial
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRect, QPoint
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPen, QCursor
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRect
+from PySide6.QtGui import QAction, QCursor
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QSystemTrayIcon, QMenu,
     QComboBox, QSpinBox, QTextEdit, QGroupBox,
-    QApplication, QStatusBar,
+    QApplication, QStatusBar, QListWidget, QListWidgetItem,
+    QDialog, QDialogButtonBox,
 )
 
 from src.core.config import AppConfig
 from src.core.pipeline import TranslationPipeline, PipelineResult
 from src.core.screenshot import CaptureRegion
+from src.core.window_tracker import WindowTracker, WindowInfo
 from src.overlay.overlay_widget import OverlayWindow
 from src.overlay.region_selector import RegionSelector
 
@@ -28,8 +29,49 @@ logger = logging.getLogger(__name__)
 
 class AsyncWorker(QObject):
     """异步翻译工作线程信号桥"""
-    result_ready = Signal(object)  # PipelineResult
+    result_ready = Signal(object)
     error_occurred = Signal(str)
+
+
+class WindowPickerDialog(QDialog):
+    """窗口选择对话框"""
+
+    def __init__(self, windows: list[WindowInfo], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("选择要翻译的窗口")
+        self.setMinimumSize(400, 300)
+        self.selected_window: Optional[WindowInfo] = None
+
+        layout = QVBoxLayout(self)
+
+        hint = QLabel("选择一个游戏窗口，工具会自动跟踪并实时翻译：")
+        hint.setStyleSheet("font-size: 13px; margin-bottom: 8px;")
+        layout.addWidget(hint)
+
+        self._list = QListWidget()
+        self._list.setStyleSheet("font-size: 14px;")
+        self._windows = windows
+        for w in windows:
+            item = QListWidgetItem(f"{w.display_name}  ({w.width}x{w.height})")
+            self._list.addItem(item)
+        self._list.itemDoubleClicked.connect(self._on_double_click)
+        layout.addWidget(self._list)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self):
+        row = self._list.currentRow()
+        if row >= 0:
+            self.selected_window = self._windows[row]
+            self.accept()
+
+    def _on_double_click(self, item):
+        row = self._list.row(item)
+        self.selected_window = self._windows[row]
+        self.accept()
 
 
 class MainWindow(QMainWindow):
@@ -45,13 +87,19 @@ class MainWindow(QMainWindow):
         self._is_translating = False
         self._worker = AsyncWorker()
         self._worker.result_ready.connect(self._on_translate_result)
+        self._worker.error_occurred.connect(self._on_translate_error)
+
+        # 窗口跟踪
+        self._window_tracker = WindowTracker()
+        self._tracked_window_id: Optional[int] = None
+        self._track_timer: Optional[QTimer] = None
 
         self._setup_ui()
         self._setup_tray()
 
     def _setup_ui(self):
         self.setWindowTitle("Steam游戏汉化工具 v0.1")
-        self.setMinimumSize(420, 520)
+        self.setMinimumSize(440, 600)
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
 
         central = QWidget()
@@ -60,24 +108,36 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
 
         # ─── 区域选择 ───
-        region_group = QGroupBox("截图区域")
+        region_group = QGroupBox("翻译区域")
         region_layout = QVBoxLayout(region_group)
 
         self._region_label = QLabel("未选择区域")
         self._region_label.setStyleSheet("color: #888; font-size: 13px;")
         region_layout.addWidget(self._region_label)
 
-        btn_layout = QHBoxLayout()
-        self._btn_select = QPushButton("框选区域")
-        self._btn_select.setMinimumHeight(36)
+        # 第一行按钮：选择窗口（主推）
+        self._btn_window = QPushButton("选择游戏窗口（推荐）")
+        self._btn_window.setMinimumHeight(42)
+        self._btn_window.setStyleSheet(
+            "QPushButton { background-color: #FF9800; color: white; font-weight: bold; "
+            "border-radius: 6px; font-size: 15px; }"
+            "QPushButton:hover { background-color: #F57C00; }"
+        )
+        self._btn_window.clicked.connect(self._pick_window)
+        region_layout.addWidget(self._btn_window)
+
+        # 第二行按钮：框选 / 全屏
+        btn_row = QHBoxLayout()
+        self._btn_select = QPushButton("手动框选区域")
+        self._btn_select.setMinimumHeight(34)
         self._btn_select.clicked.connect(self._select_region)
-        btn_layout.addWidget(self._btn_select)
+        btn_row.addWidget(self._btn_select)
 
         self._btn_fullscreen = QPushButton("全屏")
-        self._btn_fullscreen.setMinimumHeight(36)
+        self._btn_fullscreen.setMinimumHeight(34)
         self._btn_fullscreen.clicked.connect(self._select_fullscreen)
-        btn_layout.addWidget(self._btn_fullscreen)
-        region_layout.addLayout(btn_layout)
+        btn_row.addWidget(self._btn_fullscreen)
+        region_layout.addLayout(btn_row)
         layout.addWidget(region_group)
 
         # ─── 翻译控制 ───
@@ -86,7 +146,7 @@ class MainWindow(QMainWindow):
 
         ctrl_layout = QHBoxLayout()
         self._btn_snapshot = QPushButton("截图翻译")
-        self._btn_snapshot.setMinimumHeight(40)
+        self._btn_snapshot.setMinimumHeight(42)
         self._btn_snapshot.setStyleSheet(
             "QPushButton { background-color: #2196F3; color: white; font-weight: bold; "
             "border-radius: 6px; font-size: 14px; }"
@@ -96,7 +156,7 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(self._btn_snapshot)
 
         self._btn_realtime = QPushButton("开始实时翻译")
-        self._btn_realtime.setMinimumHeight(40)
+        self._btn_realtime.setMinimumHeight(42)
         self._btn_realtime.setCheckable(True)
         self._btn_realtime.setStyleSheet(
             "QPushButton { background-color: #4CAF50; color: white; font-weight: bold; "
@@ -113,20 +173,11 @@ class MainWindow(QMainWindow):
         settings_group = QGroupBox("设置")
         settings_layout = QVBoxLayout(settings_group)
 
-        # OCR引擎
-        ocr_layout = QHBoxLayout()
-        ocr_layout.addWidget(QLabel("OCR引擎:"))
-        self._ocr_combo = QComboBox()
-        self._ocr_combo.addItems(["rapidocr", "paddleocr"])
-        self._ocr_combo.setCurrentText(self.config.ocr.engine)
-        ocr_layout.addWidget(self._ocr_combo)
-        settings_layout.addLayout(ocr_layout)
-
         # 翻译引擎
         trans_layout = QHBoxLayout()
         trans_layout.addWidget(QLabel("翻译引擎:"))
         self._trans_combo = QComboBox()
-        self._trans_combo.addItems(["openai", "deepl", "ollama"])
+        self._trans_combo.addItems(["ollama", "openai", "deepl"])
         self._trans_combo.setCurrentText(self.config.translation.engine)
         trans_layout.addWidget(self._trans_combo)
         settings_layout.addLayout(trans_layout)
@@ -140,6 +191,15 @@ class MainWindow(QMainWindow):
         scale_layout.addWidget(self._scale_spin)
         settings_layout.addLayout(scale_layout)
 
+        # 翻译频率
+        fps_layout = QHBoxLayout()
+        fps_layout.addWidget(QLabel("翻译频率(次/秒):"))
+        self._fps_spin = QSpinBox()
+        self._fps_spin.setRange(1, 5)
+        self._fps_spin.setValue(self.config.capture_fps)
+        fps_layout.addWidget(self._fps_spin)
+        settings_layout.addLayout(fps_layout)
+
         layout.addWidget(settings_group)
 
         # ─── 结果显示 ───
@@ -147,41 +207,81 @@ class MainWindow(QMainWindow):
         result_layout = QVBoxLayout(result_group)
         self._result_text = QTextEdit()
         self._result_text.setReadOnly(True)
-        self._result_text.setMinimumHeight(120)
-        self._result_text.setStyleSheet("font-size: 14px; font-family: 'Noto Sans SC', sans-serif;")
+        self._result_text.setMinimumHeight(140)
+        self._result_text.setStyleSheet("font-size: 14px;")
         result_layout.addWidget(self._result_text)
         layout.addWidget(result_group)
 
         # ─── 状态栏 ───
         self._status = QStatusBar()
         self.setStatusBar(self._status)
-        self._status.showMessage("就绪")
+        self._status.showMessage("就绪 - 请先选择游戏窗口或框选区域")
 
     def _setup_tray(self):
-        """系统托盘"""
         self._tray = QSystemTrayIcon(self)
-        # 简单使用应用图标 (后续可替换为自定义图标)
         self._tray.setToolTip("Steam游戏汉化工具")
-
         menu = QMenu()
-        action_show = QAction("显示主窗口", self)
-        action_show.triggered.connect(self.show)
-        menu.addAction(action_show)
-
-        action_snapshot = QAction("截图翻译 (Ctrl+Shift+T)", self)
-        action_snapshot.triggered.connect(self._snapshot_translate)
-        menu.addAction(action_snapshot)
-
+        menu.addAction("显示主窗口", self.show)
+        menu.addAction("截图翻译", self._snapshot_translate)
         menu.addSeparator()
-        action_quit = QAction("退出", self)
-        action_quit.triggered.connect(QApplication.quit)
-        menu.addAction(action_quit)
-
+        menu.addAction("退出", QApplication.quit)
         self._tray.setContextMenu(menu)
         self._tray.show()
 
+    # ─── 窗口选择 ───
+
+    def _pick_window(self):
+        """弹出窗口选择列表"""
+        windows = self._window_tracker.list_windows()
+        if not windows:
+            self._status.showMessage("未检测到可用窗口")
+            return
+
+        dialog = WindowPickerDialog(windows, self)
+        if dialog.exec() == QDialog.Accepted and dialog.selected_window:
+            w = dialog.selected_window
+            self._tracked_window_id = w.window_id
+            self.capture_region = w.to_capture_region()
+            self._region_label.setText(
+                f"窗口: {w.display_name}\n"
+                f"位置: ({w.x}, {w.y}) {w.width}x{w.height}"
+            )
+            self._region_label.setStyleSheet(
+                "color: #FF9800; font-size: 13px; font-weight: bold;"
+            )
+            self._status.showMessage(f"已锁定窗口: {w.display_name}")
+
+            # 启动窗口位置跟踪
+            self._start_window_tracking()
+
+    def _start_window_tracking(self):
+        """定时刷新窗口位置（窗口移动/缩放时自动跟）"""
+        if self._track_timer:
+            self._track_timer.stop()
+        self._track_timer = QTimer(self)
+        self._track_timer.timeout.connect(self._update_window_position)
+        self._track_timer.start(500)  # 每0.5秒刷新位置
+
+    def _update_window_position(self):
+        """更新跟踪窗口的位置"""
+        if self._tracked_window_id is None:
+            return
+        w = self._window_tracker.get_window_by_id(self._tracked_window_id)
+        if w:
+            self.capture_region = w.to_capture_region()
+            # 覆盖层跟随移动
+            if self.overlay and self.overlay.isVisible():
+                self.overlay.setGeometry(w.x, w.y, w.width, w.height)
+        else:
+            # 窗口关闭了
+            self._status.showMessage("游戏窗口已关闭")
+            if self._track_timer:
+                self._track_timer.stop()
+            self._tracked_window_id = None
+
+    # ─── 区域选择(手动) ───
+
     def _select_region(self):
-        """打开区域选择器"""
         self.hide()
         QTimer.singleShot(200, self._do_select_region)
 
@@ -191,56 +291,56 @@ class MainWindow(QMainWindow):
         selector.showFullScreen()
 
     def _on_region_selected(self, rect: QRect):
+        self._tracked_window_id = None  # 手动框选时取消窗口跟踪
+        if self._track_timer:
+            self._track_timer.stop()
         self.capture_region = CaptureRegion(
             x=rect.x(), y=rect.y(),
             width=rect.width(), height=rect.height(),
         )
         self._region_label.setText(
-            f"区域: ({rect.x()}, {rect.y()}) {rect.width()}x{rect.height()}"
+            f"手动区域: ({rect.x()}, {rect.y()}) {rect.width()}x{rect.height()}"
         )
         self._region_label.setStyleSheet("color: #4CAF50; font-size: 13px; font-weight: bold;")
         self.show()
-        self._status.showMessage("区域已选择，可以开始翻译")
+        self._status.showMessage("区域已选择")
 
     def _select_fullscreen(self):
+        self._tracked_window_id = None
+        if self._track_timer:
+            self._track_timer.stop()
         monitors = self.pipeline.capture.get_monitors()
         if monitors:
             m = monitors[0]
             self.capture_region = CaptureRegion(
-                x=m["left"], y=m["top"],
-                width=m["width"], height=m["height"],
+                x=m["left"], y=m["top"], width=m["width"], height=m["height"],
             )
-            self._region_label.setText(
-                f"全屏: {m['width']}x{m['height']}"
-            )
+            self._region_label.setText(f"全屏: {m['width']}x{m['height']}")
             self._region_label.setStyleSheet("color: #4CAF50; font-size: 13px; font-weight: bold;")
-            self._status.showMessage("已选择全屏区域")
+            self._status.showMessage("已选择全屏")
+
+    # ─── 翻译操作 ───
 
     def _apply_settings(self):
-        """应用设置变更"""
-        self.config.ocr.engine = self._ocr_combo.currentText()
         self.config.translation.engine = self._trans_combo.currentText()
         self.config.ocr.scale_factor = self._scale_spin.value()
-        # 重建OCR引擎
+        self.config.capture_fps = self._fps_spin.value()
         from src.ocr.engine import create_ocr_engine
         self.pipeline.ocr = create_ocr_engine(
             self.config.ocr.engine,
             confidence_threshold=self.config.ocr.confidence_threshold,
         )
-        self.pipeline.translator = None  # 下次使用时重建
+        self.pipeline.translator = None
         self.config.save()
 
     def _snapshot_translate(self):
-        """单次截图翻译"""
         if not self.capture_region:
-            self._status.showMessage("请先选择截图区域")
+            self._status.showMessage("请先选择游戏窗口或框选区域")
             return
-
         self._apply_settings()
         self._status.showMessage("正在翻译...")
         self._btn_snapshot.setEnabled(False)
 
-        # 在线程中运行异步翻译
         def run():
             loop = asyncio.new_event_loop()
             try:
@@ -256,11 +356,10 @@ class MainWindow(QMainWindow):
         threading.Thread(target=run, daemon=True).start()
 
     def _toggle_realtime(self):
-        """切换实时翻译"""
         if self._btn_realtime.isChecked():
             if not self.capture_region:
                 self._btn_realtime.setChecked(False)
-                self._status.showMessage("请先选择截图区域")
+                self._status.showMessage("请先选择游戏窗口或框选区域")
                 return
             self._apply_settings()
             self._btn_realtime.setText("停止实时翻译")
@@ -270,13 +369,12 @@ class MainWindow(QMainWindow):
             self._stop_realtime()
 
     def _start_realtime(self):
-        """启动实时翻译定时器"""
         interval = int(1000 / self.config.capture_fps)
         self._realtime_timer = QTimer(self)
         self._realtime_timer.timeout.connect(self._realtime_tick)
         self._realtime_timer.start(interval)
         self._is_translating = False
-        self._status.showMessage(f"实时翻译中... (FPS={self.config.capture_fps})")
+        self._status.showMessage(f"实时翻译中... ({self.config.capture_fps}次/秒)")
 
     def _stop_realtime(self):
         if self._realtime_timer:
@@ -286,11 +384,8 @@ class MainWindow(QMainWindow):
         self._status.showMessage("实时翻译已停止")
 
     def _realtime_tick(self):
-        """实时翻译定时回调"""
         if self._is_translating or not self.capture_region:
             return
-
-        # 检测画面变化
         if not self.pipeline.capture.has_changed(self.capture_region):
             return
 
@@ -312,7 +407,6 @@ class MainWindow(QMainWindow):
         threading.Thread(target=run, daemon=True).start()
 
     def _on_translate_result(self, result: PipelineResult):
-        """翻译结果回调"""
         self._btn_snapshot.setEnabled(True)
 
         if not result.blocks:
@@ -320,43 +414,41 @@ class MainWindow(QMainWindow):
             self._status.showMessage("未识别到文字")
             return
 
-        # 更新结果文本
         lines = []
         for b in result.blocks:
             if self.config.overlay.show_original:
                 lines.append(f"[原] {b.original}")
-            lines.append(f"{b.translated}")
+            lines.append(b.translated)
             lines.append("")
         self._result_text.setPlainText("\n".join(lines))
 
-        # 更新覆盖层
         self._update_overlay(result)
 
         self._status.showMessage(
-            f"翻译完成: {len(result.blocks)}块 | "
-            f"OCR={result.ocr_time_ms:.0f}ms | "
-            f"翻译={result.translate_time_ms:.0f}ms | "
-            f"缓存={result.cache_hits}/{result.cache_hits + result.cache_misses}"
+            f"{len(result.blocks)}块 | "
+            f"OCR {result.ocr_time_ms:.0f}ms | "
+            f"翻译 {result.translate_time_ms:.0f}ms | "
+            f"缓存 {result.cache_hits}/{result.cache_hits + result.cache_misses}"
         )
 
+    def _on_translate_error(self, error: str):
+        self._btn_snapshot.setEnabled(True)
+        self._status.showMessage(f"翻译出错: {error}")
+        logger.error(f"翻译错误: {error}")
+
     def _update_overlay(self, result: PipelineResult):
-        """更新透明覆盖层"""
         if not self.capture_region:
             return
-
         if self.overlay is None:
             self.overlay = OverlayWindow(self.config.overlay)
-
         self.overlay.update_content(result.blocks, self.capture_region)
         self.overlay.show()
 
     def closeEvent(self, event):
-        """关闭时最小化到托盘"""
         event.ignore()
         self.hide()
         self._tray.showMessage(
             "Steam游戏汉化工具",
-            "已最小化到系统托盘，右键图标可退出",
-            QSystemTrayIcon.Information,
-            2000,
+            "已最小化到托盘，右键图标可退出",
+            QSystemTrayIcon.Information, 2000,
         )

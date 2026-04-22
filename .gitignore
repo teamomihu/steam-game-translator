@@ -34,3 +34,4 @@ config/secrets.json
 # Distribution
 *.whl
 *.tar.gz
+app.log

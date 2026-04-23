@@ -542,10 +542,27 @@ class MainWindow(QMainWindow):
             finally:
                 loop.close()
 
-        # 替换 result_ready 的处理（临时）
+        # 替换信号处理（临时）
         self._worker.result_ready.disconnect()
         self._worker.result_ready.connect(self._on_one_click_signal)
+        self._worker.error_occurred.connect(self._on_one_click_error)
         threading.Thread(target=run, daemon=True).start()
+
+    def _on_one_click_error(self, error: str):
+        """一键汉化出错"""
+        self._drop_label.setText(f"汉化出错\n\n{error}\n\n请重试或检查日志")
+        self._drop_label.setStyleSheet(
+            "QLabel { border: 3px dashed #f44336; border-radius: 12px; "
+            "color: #f44336; font-size: 14px; font-weight: bold; padding: 20px; }"
+        )
+        self._progress_label.setText("")
+        self._status.showMessage(f"出错: {error}")
+        # 恢复原始信号
+        try:
+            self._worker.result_ready.disconnect()
+            self._worker.result_ready.connect(self._on_translate_result)
+        except Exception:
+            pass
 
     def _on_one_click_signal(self, data):
         """一键汉化的信号处理"""

@@ -104,8 +104,21 @@ class OneClickTranslator:
                 )
             return result
 
-        # 过滤已翻译的
-        to_translate = [e for e in entries if e.needs_translation]
+        # 过滤：已翻译的 + 清理无效字符
+        to_translate = []
+        for e in entries:
+            if not e.needs_translation:
+                continue
+            # 清理无效 Unicode 字符（surrogate 等）
+            try:
+                clean = e.original.encode("utf-8", errors="ignore").decode("utf-8")
+                if len(clean.strip()) < 3:
+                    continue
+                e.original = clean
+                to_translate.append(e)
+            except Exception:
+                continue
+
         result["total_texts"] = len(to_translate)
         logger.info(f"提取到 {len(entries)} 条文本，需翻译 {len(to_translate)} 条")
 

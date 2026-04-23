@@ -98,17 +98,42 @@ class MainWindow(QMainWindow):
         self._setup_tray()
 
     def _setup_ui(self):
-        self.setWindowTitle("Steam游戏汉化工具 v0.1")
-        self.setMinimumSize(440, 600)
+        self.setWindowTitle("Steam游戏汉化工具 v0.2")
+        self.setMinimumSize(440, 720)
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self.setAcceptDrops(True)  # 支持拖拽
 
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         layout.setSpacing(10)
 
-        # ─── 区域选择 ───
-        region_group = QGroupBox("翻译区域")
+        # ─── 一键汉化(拖拽) ───
+        drop_group = QGroupBox("一键汉化（推荐）")
+        drop_layout = QVBoxLayout(drop_group)
+
+        self._drop_label = QLabel(
+            "将游戏文件夹拖到这里\n\n"
+            "支持: RPG Maker MV/MZ, Ren'Py\n"
+            "自动检测引擎 → 提取文本 → AI翻译 → 写回游戏"
+        )
+        self._drop_label.setAlignment(Qt.AlignCenter)
+        self._drop_label.setMinimumHeight(100)
+        self._drop_label.setStyleSheet(
+            "QLabel { border: 3px dashed #FF9800; border-radius: 12px; "
+            "color: #FF9800; font-size: 15px; font-weight: bold; "
+            "padding: 20px; background: rgba(255,152,0,0.05); }"
+        )
+        drop_layout.addWidget(self._drop_label)
+
+        self._progress_label = QLabel("")
+        self._progress_label.setStyleSheet("font-size: 13px; color: #666;")
+        self._progress_label.setAlignment(Qt.AlignCenter)
+        drop_layout.addWidget(self._progress_label)
+        layout.addWidget(drop_group)
+
+        # ─── 实时翻译(OCR模式) ───
+        region_group = QGroupBox("实时翻译（OCR模式）")
         region_layout = QVBoxLayout(region_group)
 
         self._region_label = QLabel("未选择区域")
@@ -458,6 +483,138 @@ class MainWindow(QMainWindow):
             self.overlay = OverlayWindow(self.config.overlay)
         self.overlay.update_content(result.blocks, self.capture_region)
         self.overlay.show()
+
+    # ─── 拖拽一键汉化 ───
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self._drop_label.setStyleSheet(
+                "QLabel { border: 3px dashed #4CAF50; border-radius: 12px; "
+                "color: #4CAF50; font-size: 15px; font-weight: bold; "
+                "padding: 20px; background: rgba(76,175,80,0.1); }"
+            )
+
+    def dragLeaveEvent(self, event):
+        self._drop_label.setStyleSheet(
+            "QLabel { border: 3px dashed #FF9800; border-radius: 12px; "
+            "color: #FF9800; font-size: 15px; font-weight: bold; "
+            "padding: 20px; background: rgba(255,152,0,0.05); }"
+        )
+
+    def dropEvent(self, event):
+        self._drop_label.setStyleSheet(
+            "QLabel { border: 3px dashed #FF9800; border-radius: 12px; "
+            "color: #FF9800; font-size: 15px; font-weight: bold; "
+            "padding: 20px; background: rgba(255,152,0,0.05); }"
+        )
+        urls = event.mimeData().urls()
+        if urls:
+            path = urls[0].toLocalFile()
+            if path:
+                self._start_one_click(path)
+
+    def _start_one_click(self, game_path_str: str):
+        """启动一键汉化"""
+        from pathlib import Path
+        game_path = Path(game_path_str)
+
+        if not game_path.is_dir():
+            self._status.showMessage("请拖入游戏的文件夹，不是单个文件")
+            return
+
+        self._drop_label.setText(f"正在分析: {game_path.name}...")
+        self._status.showMessage("一键汉化启动中...")
+        self._apply_settings()
+
+        def run():
+            from src.core.one_click import OneClickTranslator, TranslateProgress
+            loop = asyncio.new_event_loop()
+            try:
+                translator = OneClickTranslator(self.config)
+                translator.set_progress_callback(
+                    lambda p: self._worker.result_ready.emit(("progress", p))
+                )
+                result = loop.run_until_complete(translator.translate_game(game_path))
+                self._worker.result_ready.emit(("one_click_done", result))
+            except Exception as e:
+                self._worker.error_occurred.emit(str(e))
+            finally:
+                loop.close()
+
+        # 替换 result_ready 的处理（临时）
+        self._worker.result_ready.disconnect()
+        self._worker.result_ready.connect(self._on_one_click_signal)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_one_click_signal(self, data):
+        """一键汉化的信号处理"""
+        if isinstance(data, tuple):
+            msg_type, payload = data
+
+            if msg_type == "progress":
+                progress = payload
+                if progress.phase == "detecting":
+                    self._drop_label.setText("正在检测游戏引擎...")
+                elif progress.phase == "extracting":
+                    self._drop_label.setText("正在提取游戏文本...")
+                elif progress.phase == "translating":
+                    self._drop_label.setText(
+                        f"正在翻译 {progress.done}/{progress.total} "
+                        f"({progress.percent:.0f}%)"
+                    )
+                    self._progress_label.setText(progress.current_text)
+                elif progress.phase == "injecting":
+                    self._drop_label.setText("正在写入翻译...")
+                elif progress.phase == "done":
+                    self._drop_label.setText("汉化完成!")
+
+            elif msg_type == "one_click_done":
+                result = payload
+                # 恢复原始信号连接
+                self._worker.result_ready.disconnect()
+                self._worker.result_ready.connect(self._on_translate_result)
+
+                if result["success"]:
+                    self._drop_label.setText(
+                        f"汉化完成!\n\n"
+                        f"引擎: {result['engine']}\n"
+                        f"游戏: {result['game_title']}\n"
+                        f"翻译: {result['translated']}条 | "
+                        f"缓存: {result['cached']}条 | "
+                        f"耗时: {result['time_seconds']}秒"
+                    )
+                    self._drop_label.setStyleSheet(
+                        "QLabel { border: 3px solid #4CAF50; border-radius: 12px; "
+                        "color: #4CAF50; font-size: 14px; font-weight: bold; "
+                        "padding: 20px; background: rgba(76,175,80,0.05); }"
+                    )
+                    self._status.showMessage("汉化完成! 可以启动游戏了")
+                    self._result_text.setPlainText(
+                        f"一键汉化完成!\n"
+                        f"引擎: {result['engine']}\n"
+                        f"游戏: {result['game_title']}\n"
+                        f"翻译: {result['translated']}条新翻译\n"
+                        f"缓存: {result['cached']}条命中缓存\n"
+                        f"耗时: {result['time_seconds']}秒\n\n"
+                        f"原始文件已备份到 _translation_backup 文件夹"
+                    )
+                else:
+                    self._drop_label.setText(
+                        f"汉化失败\n\n{result['error']}\n\n"
+                        f"可以拖入其他游戏重试"
+                    )
+                    self._drop_label.setStyleSheet(
+                        "QLabel { border: 3px dashed #f44336; border-radius: 12px; "
+                        "color: #f44336; font-size: 14px; font-weight: bold; "
+                        "padding: 20px; }"
+                    )
+                    self._status.showMessage(f"汉化失败: {result['error']}")
+
+                self._progress_label.setText("")
+        else:
+            # 非一键汉化的结果,走原逻辑
+            self._on_translate_result(data)
 
     def closeEvent(self, event):
         event.ignore()

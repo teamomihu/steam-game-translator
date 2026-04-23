@@ -24,13 +24,16 @@ class OCRConfig:
 
 @dataclass
 class TranslationConfig:
-    engine: str = "ollama"    # ollama | openai | deepl
+    engine: str = "ollama"    # ollama | gemini | openai | deepl
     target_language: str = "zh-CN"
     source_language: str = "auto"
     # OpenAI / Gemini
     api_key: str = ""
     api_base: str = "https://api.openai.com/v1"
     model: str = "gpt-4o-mini"
+    # Gemini
+    gemini_key: str = ""
+    gemini_model: str = "gemini-2.0-flash"
     # DeepL
     deepl_key: str = ""
     # Ollama (本地)
@@ -109,6 +112,8 @@ class AppConfig:
 def apply_env_overrides(cfg: AppConfig) -> AppConfig:
     if key := os.environ.get("OPENAI_API_KEY"):
         cfg.translation.api_key = key
+    if key := os.environ.get("GEMINI_API_KEY"):
+        cfg.translation.gemini_key = key
     if key := os.environ.get("DEEPL_API_KEY"):
         cfg.translation.deepl_key = key
     return cfg

@@ -202,7 +202,7 @@ class MainWindow(QMainWindow):
         trans_layout = QHBoxLayout()
         trans_layout.addWidget(QLabel("翻译引擎:"))
         self._trans_combo = QComboBox()
-        self._trans_combo.addItems(["ollama", "openai", "deepl"])
+        self._trans_combo.addItems(["gemini", "ollama", "openai", "deepl"])
         self._trans_combo.setCurrentText(self.config.translation.engine)
         trans_layout.addWidget(self._trans_combo)
         settings_layout.addLayout(trans_layout)

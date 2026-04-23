@@ -181,6 +181,70 @@ class DeepLEngine(TranslationEngine):
         await self._client.aclose()
 
 
+class GeminiEngine(TranslationEngine):
+    """Google Gemini 翻译引擎 (免费额度大)"""
+
+    def __init__(self, api_key: str, model: str = "gemini-2.0-flash"):
+        self._api_key = api_key
+        self._model = model
+        self._client = httpx.AsyncClient(timeout=30.0)
+
+    async def translate(self, request: TranslationRequest) -> TranslationResult:
+        glossary_text = ""
+        if request.glossary:
+            pairs = [f"{k}→{v}" for k, v in request.glossary.items()]
+            glossary_text = f"术语表：{', '.join(pairs)}\n"
+
+        prompt = (
+            f"[翻译任务] 将下面的英文/日文游戏文本翻译成中文。\n"
+            f"规则：只输出中文译文，不要解释，不要说多余的话。\n"
+            f"如果原文包含HTML标签(如<br>、<color>)，保留标签不翻译。\n"
+            f"{glossary_text}"
+            f"原文：{request.text}\n"
+            f"中文译文："
+        )
+
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/"
+            f"models/{self._model}:generateContent?key={self._api_key}"
+        )
+
+        response = await self._client.post(
+            url,
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 500},
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        translated = ""
+        try:
+            translated = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except (KeyError, IndexError):
+            translated = "[翻译失败]"
+
+        # 清理
+        for prefix in ["中文译文：", "译文：", "翻译："]:
+            if translated.startswith(prefix):
+                translated = translated[len(prefix):].strip()
+        if translated.startswith('"') and translated.endswith('"'):
+            translated = translated[1:-1]
+
+        return TranslationResult(
+            original=request.text,
+            translated=translated,
+            engine=f"gemini/{self._model}",
+        )
+
+    def name(self) -> str:
+        return f"Gemini ({self._model})"
+
+    async def close(self):
+        await self._client.aclose()
+
+
 class OllamaEngine(TranslationEngine):
     """Ollama本地LLM翻译引擎 (完全免费离线)"""
 
@@ -294,6 +358,11 @@ def create_translation_engine(config) -> TranslationEngine:
             api_base=config.api_base,
             model=config.model,
             prompt_template=config.prompt_template,
+        )
+    elif config.engine == "gemini":
+        return GeminiEngine(
+            api_key=config.gemini_key,
+            model=config.gemini_model,
         )
     elif config.engine == "deepl":
         return DeepLEngine(api_key=config.deepl_key)

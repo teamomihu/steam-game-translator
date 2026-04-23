@@ -104,32 +104,28 @@ class IL2CPPPatcher:
         count = 0
         for entry in translated:
             try:
-                translated_bytes = entry.translated.encode("utf-8")
                 orig_len = entry.original_bytes
+                pos = entry.offset + 4  # 字符串内容起始位置
 
-                if len(translated_bytes) <= orig_len:
-                    # 译文更短或等长: 写入 + 用 null 填充剩余空间
-                    # 先更新长度字段
-                    struct.pack_into("<I", data, entry.offset, len(translated_bytes))
-                    # 写入译文
-                    pos = entry.offset + 4
-                    data[pos : pos + len(translated_bytes)] = translated_bytes
-                    # 用 null 填充剩余
-                    remaining = orig_len - len(translated_bytes)
-                    if remaining > 0:
-                        data[pos + len(translated_bytes) : pos + orig_len] = b"\x00" * remaining
-                    count += 1
-                else:
-                    # 译文更长: 截断到原长度
-                    truncated = self._truncate_utf8(entry.translated, orig_len)
-                    truncated_bytes = truncated.encode("utf-8")
-                    struct.pack_into("<I", data, entry.offset, len(truncated_bytes))
-                    pos = entry.offset + 4
-                    data[pos : pos + len(truncated_bytes)] = truncated_bytes
-                    remaining = orig_len - len(truncated_bytes)
-                    if remaining > 0:
-                        data[pos + len(truncated_bytes) : pos + orig_len] = b"\x00" * remaining
-                    count += 1
+                # 关键：截断译文使其字节数 <= 原文字节数
+                # 绝对不能超过原长度，否则会覆盖后面的数据
+                truncated = self._truncate_utf8(entry.translated, orig_len)
+                translated_bytes = truncated.encode("utf-8")
+
+                # 安全检查
+                if len(translated_bytes) > orig_len:
+                    logger.warning(f"截断后仍超长，跳过: {entry.original[:30]}")
+                    continue
+
+                # 写入译文内容（不改长度字段！保持文件结构完整）
+                # Unity读取时会按长度字段读取，多余的null字节不影响
+                data[pos : pos + len(translated_bytes)] = translated_bytes
+                # 用 null 填充剩余空间
+                remaining = orig_len - len(translated_bytes)
+                if remaining > 0:
+                    data[pos + len(translated_bytes) : pos + orig_len] = b"\x00" * remaining
+
+                count += 1
             except Exception as e:
                 logger.warning(f"补丁失败 [{entry.original[:30]}]: {e}")
 

@@ -73,7 +73,12 @@ class OneClickTranslator:
         self._report(TranslateProgress(0, 0, phase="detecting"))
         detection = self.detector.detect(game_path)
         if not detection:
-            result["error"] = "未能识别游戏引擎。当前支持：RPG Maker MV/MZ, Ren'Py"
+            result["error"] = (
+                "未能识别游戏引擎。\n"
+                "当前一键汉化支持: RPG Maker MV/MZ, Ren'Py, Unity\n\n"
+                "你可以用下方的「实时翻译」模式:\n"
+                "选择游戏窗口 → 开始实时翻译"
+            )
             return result
 
         detect_result, adapter = detection
@@ -85,7 +90,18 @@ class OneClickTranslator:
         self._report(TranslateProgress(0, 0, phase="extracting"))
         entries = adapter.extract_texts(game_path)
         if not entries:
-            result["error"] = "未找到可翻译的文本"
+            engine = detect_result.engine_name
+            if "IL2CPP" in engine:
+                result["error"] = (
+                    f"检测到 {engine}，但游戏文本编译在代码中，无法直接提取。\n\n"
+                    f"这是最难汉化的游戏类型。请用下方的「实时翻译」模式:\n"
+                    f"选择游戏窗口 → 开始实时翻译"
+                )
+            else:
+                result["error"] = (
+                    f"检测到 {engine}，但未找到可翻译的文本文件。\n\n"
+                    f"请用下方的「实时翻译」模式"
+                )
             return result
 
         # 过滤已翻译的

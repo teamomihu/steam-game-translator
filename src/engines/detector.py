@@ -32,6 +32,12 @@ class EngineDetector:
         except Exception as e:
             logger.warning(f"RenPy适配器加载失败: {e}")
 
+        try:
+            from src.engines.unity import UnityAdapter
+            self._adapters.append(UnityAdapter())
+        except Exception as e:
+            logger.warning(f"Unity适配器加载失败: {e}")
+
     def detect(self, game_path: Path) -> Optional[tuple[EngineDetectResult, GameEngineAdapter]]:
         """检测游戏引擎，返回 (检测结果, 适配器) 或 None"""
         if not game_path.is_dir():

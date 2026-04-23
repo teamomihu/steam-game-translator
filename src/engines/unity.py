@@ -113,12 +113,29 @@ class UnityAdapter(GameEngineAdapter):
         except Exception as e:
             logger.warning(f"UnityPy 提取失败: {e}")
 
+        # 3. IL2CPP 二进制扫描
+        # 对 IL2CPP 游戏始终执行 (传统方法提取不到游戏对话)
+        is_il2cpp = (data_dir / "il2cpp_data").exists()
+        if is_il2cpp or len(entries) < 20:
+            try:
+                from src.engines.il2cpp_patcher import IL2CPPPatcher
+                patcher = IL2CPPPatcher()
+                bin_entries = patcher.extract_strings(data_dir)
+                for be in bin_entries:
+                    entries.append(TextEntry(
+                        key=f"bin:{be.file_path}:0x{be.offset:08X}",
+                        original=be.original,
+                        file_path=be.file_path,
+                    ))
+                # 保存 patcher 引用供写回使用
+                self._il2cpp_patcher = patcher
+                self._il2cpp_entries = bin_entries
+                logger.info(f"IL2CPP二进制扫描: 提取 {len(bin_entries)} 条文本")
+            except Exception as e:
+                logger.warning(f"IL2CPP 扫描失败: {e}")
+
         if not entries:
-            logger.warning(
-                "未能从 Unity 资源中提取到可翻译文本。\n"
-                "可能原因: 文本硬编码在 IL2CPP 编译的代码中。\n"
-                "建议: 使用 OCR 实时翻译模式。"
-            )
+            logger.warning("未能提取到可翻译文本")
 
         logger.info(f"Unity: 提取了 {len(entries)} 条文本")
         return entries
@@ -378,6 +395,7 @@ class UnityAdapter(GameEngineAdapter):
         # 按来源分类
         sa_entries = [e for e in entries if e.key.startswith("sa:") and e.translated]
         asset_entries = [e for e in entries if e.key.startswith(("asset:", "mono:")) and e.translated]
+        bin_entries = [e for e in entries if e.key.startswith("bin:") and e.translated]
 
         # 1. StreamingAssets 文件: 直接修改 JSON/CSV/TXT
         sa_dir = data_dir / "StreamingAssets"
@@ -385,6 +403,25 @@ class UnityAdapter(GameEngineAdapter):
 
         # 2. Unity assets: 用 UnityPy 写回
         count += self._inject_assets(data_dir, asset_entries, backup)
+
+        # 3. IL2CPP 二进制补丁: 直接改 level/assets 文件中的字符串
+        if bin_entries and hasattr(self, "_il2cpp_patcher") and hasattr(self, "_il2cpp_entries"):
+            # 把翻译映射回 BinaryStringEntry
+            translation_map = {e.original: e.translated for e in bin_entries}
+            for be in self._il2cpp_entries:
+                if be.original in translation_map:
+                    be.translated = translation_map[be.original]
+
+            # 按文件分组并补丁
+            by_file: dict[str, list] = {}
+            for be in self._il2cpp_entries:
+                if be.translated:
+                    by_file.setdefault(be.file_path, []).append(be)
+
+            for fname, file_entries in by_file.items():
+                fpath = data_dir / fname
+                if fpath.exists():
+                    count += self._il2cpp_patcher.patch_file(fpath, file_entries, backup)
 
         logger.info(f"Unity: 成功写入 {count} 条翻译")
         return count

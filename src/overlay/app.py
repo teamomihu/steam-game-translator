@@ -30,4 +30,7 @@ def run_app(config: AppConfig):
     window = MainWindow(config)
     window.show()
 
+    # 应用退出时清理全局快捷键
+    app.aboutToQuit.connect(window.destroy_hotkeys)
+
     sys.exit(app.exec())

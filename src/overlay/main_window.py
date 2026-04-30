@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.config import AppConfig
+from src.core.hotkey_manager import GlobalHotkeyManager, setup_hotkeys
 from src.core.pipeline import TranslationPipeline, PipelineResult
 from src.core.screenshot import CaptureRegion
 from src.core.window_tracker import WindowTracker, WindowInfo
@@ -31,6 +32,7 @@ class AsyncWorker(QObject):
     """异步翻译工作线程信号桥"""
     result_ready = Signal(object)
     error_occurred = Signal(str)
+    hotkey_triggered = Signal(str)  # 全局快捷键信号(从pynput线程安全传到Qt主线程)
 
 
 class WindowPickerDialog(QDialog):
@@ -96,6 +98,7 @@ class MainWindow(QMainWindow):
 
         self._setup_ui()
         self._setup_tray()
+        self._setup_hotkeys()
 
     def _setup_ui(self):
         self.setWindowTitle("Steam游戏汉化工具 v0.2")
@@ -227,6 +230,22 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(settings_group)
 
+        # ─── 快捷键提示 ───
+        hotkey_group = QGroupBox("全局快捷键")
+        hotkey_layout = QVBoxLayout(hotkey_group)
+        hk = self.config.hotkeys
+        hotkey_info = QLabel(
+            f"截图翻译: {hk.toggle_translate}\n"
+            f"实时翻译: {hk.toggle_realtime}\n"
+            f"切换原文: {hk.toggle_display}\n"
+            f"重新翻译: {hk.retranslate}"
+        )
+        hotkey_info.setStyleSheet(
+            "font-size: 12px; color: #888; padding: 4px; line-height: 1.6;"
+        )
+        hotkey_layout.addWidget(hotkey_info)
+        layout.addWidget(hotkey_group)
+
         # ─── 结果显示 ───
         result_group = QGroupBox("翻译结果")
         result_layout = QVBoxLayout(result_group)
@@ -252,6 +271,66 @@ class MainWindow(QMainWindow):
         menu.addAction("退出", QApplication.quit)
         self._tray.setContextMenu(menu)
         self._tray.show()
+
+    # ─── 全局快捷键 ───
+
+    def _setup_hotkeys(self):
+        """初始化全局快捷键监听"""
+        self._hotkey_manager: Optional[GlobalHotkeyManager] = None
+        self._worker.hotkey_triggered.connect(self._on_hotkey)
+
+        try:
+            hk = self.config.hotkeys
+            # pynput 回调在后台线程，通过 Qt 信号桥到主线程
+            self._hotkey_manager = setup_hotkeys(
+                config=hk,
+                on_snapshot=lambda: self._worker.hotkey_triggered.emit("snapshot"),
+                on_toggle_realtime=lambda: self._worker.hotkey_triggered.emit("realtime"),
+                on_toggle_display=lambda: self._worker.hotkey_triggered.emit("display"),
+                on_retranslate=lambda: self._worker.hotkey_triggered.emit("retranslate"),
+            )
+            self._status.showMessage(
+                f"就绪 | 快捷键: "
+                f"截图翻译 {hk.toggle_translate}  "
+                f"实时翻译 {hk.toggle_realtime}  "
+                f"切换原文 {hk.toggle_display}"
+            )
+        except Exception as e:
+            logger.error(f"全局快捷键初始化失败: {e}")
+            self._status.showMessage("就绪 - 快捷键初始化失败，请手动操作")
+
+    def _on_hotkey(self, action: str):
+        """处理全局快捷键触发（已在 Qt 主线程中）"""
+        if action == "snapshot":
+            self._snapshot_translate()
+        elif action == "realtime":
+            # 模拟按钮点击切换
+            self._btn_realtime.setChecked(not self._btn_realtime.isChecked())
+            self._toggle_realtime()
+        elif action == "display":
+            self._toggle_display()
+        elif action == "retranslate":
+            self._retranslate()
+
+    def _toggle_display(self):
+        """切换原文/译文显示模式"""
+        self.config.overlay.show_original = not self.config.overlay.show_original
+        mode = "原文+译文" if self.config.overlay.show_original else "仅译文"
+        self._status.showMessage(f"显示模式: {mode}")
+        logger.info(f"切换显示模式: {mode}")
+
+        # 如果有上次的翻译结果，立即刷新显示
+        current_text = self._result_text.toPlainText()
+        if current_text and current_text != "未识别到文字":
+            # 触发一次截图翻译来刷新
+            self._snapshot_translate()
+
+    def _retranslate(self):
+        """强制重新翻译（清除上下文历史后重新翻译）"""
+        self._status.showMessage("重新翻译...")
+        # 清除 pipeline 的上下文历史以获得全新翻译
+        self.pipeline._context.clear()
+        self._snapshot_translate()
 
     # ─── 窗口选择 ───
 
@@ -641,3 +720,9 @@ class MainWindow(QMainWindow):
             "已最小化到托盘，右键图标可退出",
             QSystemTrayIcon.Information, 2000,
         )
+
+    def destroy_hotkeys(self):
+        """释放快捷键资源（应用退出时调用）"""
+        if self._hotkey_manager:
+            self._hotkey_manager.stop()
+            self._hotkey_manager = None

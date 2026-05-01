@@ -4,12 +4,57 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
+
+logger = logging.getLogger(__name__)
+
+
+# ─── 限流 + 重试工具 ───
+
+class RateLimiter:
+    """简单的请求限流器（令牌桶）"""
+
+    def __init__(self, requests_per_minute: int = 30):
+        self._interval = 60.0 / requests_per_minute
+        self._last_request = 0.0
+
+    async def wait(self):
+        now = time.monotonic()
+        elapsed = now - self._last_request
+        if elapsed < self._interval:
+            await asyncio.sleep(self._interval - elapsed)
+        self._last_request = time.monotonic()
+
+
+async def retry_with_backoff(
+    func,
+    max_retries: int = 3,
+    base_delay: float = 2.0,
+    rate_limiter: Optional[RateLimiter] = None,
+):
+    """带指数退避的重试，专门处理 429/5xx 错误"""
+    for attempt in range(max_retries + 1):
+        if rate_limiter:
+            await rate_limiter.wait()
+        try:
+            return await func()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status == 429 or status >= 500:
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    logger.info(f"HTTP {status}，{delay:.0f}秒后重试 ({attempt+1}/{max_retries})")
+                    await asyncio.sleep(delay)
+                    continue
+            raise
+    raise RuntimeError("重试次数耗尽")
 
 
 @dataclass
@@ -188,6 +233,8 @@ class GeminiEngine(TranslationEngine):
         self._api_key = api_key
         self._model = model
         self._client = httpx.AsyncClient(timeout=30.0)
+        # Gemini 免费版限制 15 RPM，留余量用 12
+        self._rate_limiter = RateLimiter(requests_per_minute=12)
 
     async def translate(self, request: TranslationRequest) -> TranslationResult:
         glossary_text = ""
@@ -209,15 +256,23 @@ class GeminiEngine(TranslationEngine):
             f"models/{self._model}:generateContent?key={self._api_key}"
         )
 
-        response = await self._client.post(
-            url,
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 500},
-            },
+        async def _do_request():
+            response = await self._client.post(
+                url,
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.2, "maxOutputTokens": 500},
+                },
+            )
+            response.raise_for_status()
+            return response.json()
+
+        data = await retry_with_backoff(
+            _do_request,
+            max_retries=4,
+            base_delay=5.0,
+            rate_limiter=self._rate_limiter,
         )
-        response.raise_for_status()
-        data = response.json()
 
         translated = ""
         try:

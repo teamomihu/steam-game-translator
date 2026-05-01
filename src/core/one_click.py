@@ -160,9 +160,25 @@ class OneClickTranslator:
         result["translated"] = translated
         result["cached"] = cached
 
-        # 4. 写回游戏文件
-        self._report(TranslateProgress(len(to_translate), len(to_translate), phase="injecting"))
+        # 4. 安全检查：翻译成功率过低则不写入，防止损坏游戏
         translated_entries = [e for e in to_translate if e.translated]
+        success_count = len(translated_entries)
+        total_count = len(to_translate)
+        success_rate = success_count / total_count if total_count > 0 else 0
+
+        if total_count > 20 and success_rate < 0.3:
+            result["error"] = (
+                f"翻译成功率过低 ({success_count}/{total_count} = {success_rate:.0%})，"
+                f"已中止写入以保护游戏文件。\n\n"
+                f"可能原因: API 限流(429)或 Key 额度用完。\n"
+                f"建议: 等几分钟后重试，或更换翻译引擎。"
+            )
+            result["time_seconds"] = round(time.time() - t0, 1)
+            logger.warning(f"翻译成功率 {success_rate:.0%}，中止写入")
+            return result
+
+        # 5. 写回游戏文件
+        self._report(TranslateProgress(len(to_translate), len(to_translate), phase="injecting"))
         inject_count = adapter.inject_translations(game_path, translated_entries)
 
         result["success"] = inject_count > 0
@@ -170,7 +186,7 @@ class OneClickTranslator:
 
         self._report(TranslateProgress(len(to_translate), len(to_translate), phase="done"))
         logger.info(
-            f"汉化完成: {inject_count}条写入, "
+            f"汉化完成: {inject_count}条写入 ({success_rate:.0%}成功率), "
             f"{cached}条缓存命中, 耗时{result['time_seconds']}秒"
         )
         return result
